@@ -19,6 +19,8 @@ extern "C" {
 #define LUA_MODULE_IMU_SELECTED_CHIP_NAME "icm42670"
 #elif CONFIG_LUA_MODULE_IMU_CHIP_MPU6050
 #define LUA_MODULE_IMU_SELECTED_CHIP_NAME "mpu6050"
+#elif CONFIG_LUA_MODULE_IMU_CHIP_QMI8658
+#define LUA_MODULE_IMU_SELECTED_CHIP_NAME "qmi8658"
 #else
 #error "No IMU chip model selected for lua_module_imu"
 #endif

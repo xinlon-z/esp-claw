@@ -1,0 +1,61 @@
+version: 1.0.0
+# Peripherals Configuration for Waveshare ESP32-S3-LCD-1.47B
+# Pinout (from Waveshare schematic / demo source):
+#   Display (ST7789, SPI):  MOSI=45, SCLK=40, CS=42, DC=41, RST=39, BL=46
+#   I2C (QMI8658 IMU):      SCL=47, SDA=48
+#   RGB LED (WS2812B):      GPIO38
+#   Boot button:            GPIO0
+#   Battery ADC:            GPIO1
+#   SD card (MMC 4-bit):    CLK=14, CMD=15, D0=16, D1=18, D2=17, D3=21
+
+peripherals:
+  # I2C bus — QMI8658 6-DOF IMU
+  - name: i2c_master
+    type: i2c
+    role: master
+    config:
+      port: 0
+      pins:
+        sda: 48
+        scl: 47
+
+  # SPI bus dedicated to the on-board ST7789 LCD
+  - name: spi_display
+    type: spi
+    role: master
+    config:
+      spi_bus_config:
+        spi_port: SPI3_HOST
+        data0_io_num: 45             # MOSI
+        sclk_io_num: 40              # SCLK
+        max_transfer_sz: 110080      # 172 * 320 * 2 bytes for full-frame DMA
+
+  # LCD backlight — GPIO46, 1 kHz 10-bit PWM, active HIGH
+  - name: ledc_backlight
+    type: ledc
+    role: none
+    config:
+      gpio_num: 46
+      freq_hz: 1000
+      duty: 900                       # ~90 % at startup (matches demo default)
+      duty_resolution: LEDC_TIMER_10_BIT
+      output_invert: false
+
+  # RMT TX for WS2812B RGB LED on GPIO38
+  - name: rmt_tx
+    type: rmt
+    role: tx
+    config:
+      gpio_num: 38
+      clk_src: RMT_CLK_SRC_DEFAULT
+      resolution_hz: 10000000
+      mem_block_symbols: 64
+      trans_queue_depth: 4
+      intr_priority: 1
+      flags:
+        invert_out: false
+        with_dma: true               # ESP32-S3 RMT can use DMA channel
+        io_loop_back: false
+        io_od_mode: false
+        allow_pd: false
+        init_level: false

@@ -1,0 +1,102 @@
+version: 1.0.0
+# Devices Configuration for Waveshare ESP32-S3-LCD-1.47B
+#
+# Peripherals:
+#   ST7789  — 1.47" 172x320 SPI LCD with X offset 34 (physical frame 240 px wide)
+#   QMI8658 — 6-DOF IMU (accelerometer + gyroscope), I2C 0x6B
+#   WS2812B — single addressable RGB LED on GPIO38
+#   Boot button — GPIO0 (active low)
+#   Battery ADC — GPIO1
+#   SD card — SDMMC 4-bit on GPIO 14/15/16/17/18/21
+
+devices:
+  # ST7789 LCD — SPI, 172x320, 1.47" round
+  # Panel offset X=34 set by lcd_panel_factory_entry_t in setup_device.c.
+  - name: display_lcd
+    chip: st7789
+    type: display_lcd
+    sub_type: spi
+    version: default
+    config:
+      mirror_x: false
+      mirror_y: false
+      swap_xy: false
+      invert_color: true             # ST7789 panel requires color inversion (INVON 0x21)
+      x_max: 172
+      y_max: 320
+      io_spi_config:
+        cs_gpio_num: 42
+        dc_gpio_num: 41
+        spi_mode: 0
+        pclk_hz: 80000000            # 80 MHz SPI clock
+      lcd_panel_config:
+        reset_gpio_num: 39
+        data_endian: LCD_RGB_DATA_ENDIAN_BIG
+        vendor_config: NULL
+    peripherals:
+      - name: spi_display
+
+  # LCD backlight brightness control
+  - name: lcd_brightness
+    type: ledc_ctrl
+    version: default
+    peripherals:
+      - name: ledc_backlight
+
+  # QMI8658 6-DOF IMU (accelerometer + gyroscope + temperature)
+  # init_skip: the Lua imu module initialises this device on demand.
+  - name: imu_sensor
+    chip: qmi8658
+    type: custom
+    version: 1.0.0
+    init_skip: true
+    config:
+      i2c_addr: 0x6B                 # SA0 low → 0x6B; SA0 high → 0x6A
+      frequency: 400000
+      int_gpio_num: -1               # INT pin not wired on this board
+    peripherals:
+      - name: i2c_master
+
+  # WS2812B single addressable RGB LED on GPIO38
+  # init_skip: managed by the Lua led_strip module.
+  - name: led_strip
+    chip: ws2812
+    type: custom
+    version: default
+    init_skip: true
+    dependencies:
+      espressif/led_strip:
+        version: "^3.0"
+        public: true
+    config:
+      max_leds: 1
+    peripherals:
+      - name: rmt_tx
+
+  # SD card via SDMMC 4-bit
+  - name: fs_sdcard
+    type: fs_fat
+    sub_type: sdmmc
+    version: default
+    config:
+      sub_config:
+        slot: SDMMC_HOST_SLOT_0
+        frequency: SDMMC_FREQ_HIGHSPEED
+        bus_width: 4
+        pins:
+          clk: 14
+          cmd: 15
+          d0:  16
+          d1:  18
+          d2:  17
+          d3:  21
+
+  # Boot button — active low, GPIO0
+  - name: buttons
+    chip: gpio_button
+    type: custom
+    version: 1.0.0
+    init_skip: true
+    config:
+      button_boot_gpio: 0
+      active_level: 0

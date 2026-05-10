@@ -28,6 +28,8 @@
 #include "icm42670.h"
 #elif CONFIG_LUA_MODULE_IMU_CHIP_MPU6050
 #include "mpu6050.h"
+#elif CONFIG_LUA_MODULE_IMU_CHIP_QMI8658
+#include "qmi8658.h"
 #else
 #error "Unsupported IMU chip selection"
 #endif
@@ -40,6 +42,8 @@
 #define LUA_MODULE_IMU_LEGACY_NAME        "icm42670_sensor"
 #elif CONFIG_LUA_MODULE_IMU_CHIP_MPU6050
 #define LUA_MODULE_IMU_LEGACY_NAME        "mpu6050_sensor"
+#elif CONFIG_LUA_MODULE_IMU_CHIP_QMI8658
+#define LUA_MODULE_IMU_LEGACY_NAME        "qmi8658_sensor"
 #endif
 #define LUA_MODULE_IMU_MAX_NAME_LEN       64
 #define LUA_MODULE_IMU_DEFAULT_FREQ_HZ    400000
@@ -51,6 +55,10 @@ typedef struct {
     icm42670_handle_t sensor_handle;
 #elif CONFIG_LUA_MODULE_IMU_CHIP_MPU6050
     mpu6050_dev_t sensor_handle;
+    i2c_bus_device_handle_t i2c_dev_handle;
+    bool sensor_initialized;
+#elif CONFIG_LUA_MODULE_IMU_CHIP_QMI8658
+    qmi8658_dev_t sensor_handle;
     i2c_bus_device_handle_t i2c_dev_handle;
     bool sensor_initialized;
 #endif
@@ -496,7 +504,105 @@ static esp_err_t lua_module_imu_create_handle(const lua_imu_resolved_cfg_t *cfg,
     return ESP_OK;
 }
 
-#endif // CONFIG_LUA_MODULE_IMU_CHIP_BMI270 || CONFIG_LUA_MODULE_IMU_CHIP_ICM42670 || CONFIG_LUA_MODULE_IMU_CHIP_MPU6050
+#elif CONFIG_LUA_MODULE_IMU_CHIP_QMI8658
+
+static int8_t lua_module_imu_qmi8658_read(uint8_t reg_addr,
+                                          uint8_t *data,
+                                          uint32_t len,
+                                          void *intf_ptr)
+{
+    lua_module_imu_handle_t *handle = (lua_module_imu_handle_t *)intf_ptr;
+    if (handle == NULL || handle->i2c_dev_handle == NULL) {
+        return QMI8658_E_COM_FAIL;
+    }
+
+    return (i2c_bus_read_bytes(handle->i2c_dev_handle, reg_addr, len, data) == ESP_OK) ?
+           QMI8658_OK : QMI8658_E_COM_FAIL;
+}
+
+static int8_t lua_module_imu_qmi8658_write(uint8_t reg_addr,
+                                           const uint8_t *data,
+                                           uint32_t len,
+                                           void *intf_ptr)
+{
+    lua_module_imu_handle_t *handle = (lua_module_imu_handle_t *)intf_ptr;
+    if (handle == NULL || handle->i2c_dev_handle == NULL) {
+        return QMI8658_E_COM_FAIL;
+    }
+
+    return (i2c_bus_write_bytes(handle->i2c_dev_handle, reg_addr, len,
+                                (uint8_t *)data) == ESP_OK) ?
+           QMI8658_OK : QMI8658_E_COM_FAIL;
+}
+
+static void lua_module_imu_qmi8658_delay_ms(uint32_t period_ms, void *intf_ptr)
+{
+    (void)intf_ptr;
+    if (period_ms == 0) {
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(period_ms));
+}
+
+static esp_err_t lua_module_imu_create_handle(const lua_imu_resolved_cfg_t *cfg,
+                                              lua_module_imu_handle_t **out_handle)
+{
+    lua_module_imu_handle_t *handle = calloc(1, sizeof(lua_module_imu_handle_t));
+    if (handle == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    snprintf(handle->peripheral_name, sizeof(handle->peripheral_name), "%s", cfg->peripheral_name);
+    handle->int_gpio_num = (gpio_num_t)cfg->int_gpio_num;
+    handle->sdo_gpio_num = (gpio_num_t)cfg->sdo_gpio_num;
+    handle->i2c_addr = (uint8_t)cfg->i2c_addr;
+
+    esp_err_t err = lua_module_imu_configure_interrupt_pin(cfg->int_gpio_num);
+    if (err != ESP_OK) {
+        free(handle);
+        return err;
+    }
+
+    err = lua_module_imu_open_i2c_bus(cfg->peripheral_name, cfg->frequency,
+                                      &handle->i2c_bus_handle, &handle->peripheral_ref_held);
+    if (err != ESP_OK) {
+        free(handle);
+        return err;
+    }
+
+    handle->i2c_dev_handle = i2c_bus_device_create(handle->i2c_bus_handle, handle->i2c_addr, 0);
+    if (handle->i2c_dev_handle == NULL) {
+        ESP_LOGE(TAG, "Failed to create QMI8658 I2C device at 0x%02x", handle->i2c_addr);
+        lua_module_imu_destroy_handle(handle);
+        return ESP_FAIL;
+    }
+
+    memset(&handle->sensor_handle, 0, sizeof(handle->sensor_handle));
+    handle->sensor_handle.intf_ptr = handle;
+    handle->sensor_handle.read    = lua_module_imu_qmi8658_read;
+    handle->sensor_handle.write   = lua_module_imu_qmi8658_write;
+    handle->sensor_handle.delay_ms = lua_module_imu_qmi8658_delay_ms;
+
+    int8_t rslt = qmi8658_init(&handle->sensor_handle);
+    if (rslt != QMI8658_OK) {
+        ESP_LOGE(TAG, "Failed to initialize QMI8658 at 0x%02x: %d", handle->i2c_addr, rslt);
+        lua_module_imu_destroy_handle(handle);
+        return (rslt == QMI8658_E_DEV_NOT_FOUND) ? ESP_ERR_NOT_FOUND : ESP_FAIL;
+    }
+    handle->sensor_initialized = true;
+
+    *out_handle = handle;
+    if (cfg->int_gpio_num >= 0) {
+        ESP_LOGI(TAG, "QMI8658 IMU initialized on %s, INT GPIO%d, addr 0x%02x, freq %d Hz",
+                 cfg->peripheral_name, cfg->int_gpio_num, cfg->i2c_addr, cfg->frequency);
+    } else {
+        ESP_LOGI(TAG, "QMI8658 IMU initialized on %s, addr 0x%02x, freq %d Hz",
+                 cfg->peripheral_name, cfg->i2c_addr, cfg->frequency);
+    }
+    return ESP_OK;
+}
+
+#endif // CONFIG_LUA_MODULE_IMU_CHIP_BMI270 || ... || CONFIG_LUA_MODULE_IMU_CHIP_QMI8658
 
 static void lua_module_imu_destroy_handle(lua_module_imu_handle_t *handle)
 {
@@ -513,6 +619,11 @@ static void lua_module_imu_destroy_handle(lua_module_imu_handle_t *handle)
         handle->sensor_handle = NULL;
     }
 #elif CONFIG_LUA_MODULE_IMU_CHIP_MPU6050
+    if (handle->i2c_dev_handle != NULL) {
+        i2c_bus_device_delete(&handle->i2c_dev_handle);
+    }
+    handle->sensor_initialized = false;
+#elif CONFIG_LUA_MODULE_IMU_CHIP_QMI8658
     if (handle->i2c_dev_handle != NULL) {
         i2c_bus_device_delete(&handle->i2c_dev_handle);
     }
@@ -547,7 +658,7 @@ static lua_module_imu_ud_t *lua_module_imu_get_ud(lua_State *L, int idx)
     if (!ud || !ud->handle) {
         luaL_error(L, "imu: invalid or closed handle");
     }
-#if CONFIG_LUA_MODULE_IMU_CHIP_MPU6050
+#if CONFIG_LUA_MODULE_IMU_CHIP_MPU6050 || CONFIG_LUA_MODULE_IMU_CHIP_QMI8658
     if (!ud->handle->sensor_initialized) {
 #else
     if (!ud->handle->sensor_handle) {
@@ -674,6 +785,28 @@ static int lua_module_imu_read(lua_State *L)
     lua_setfield(L, -2, "sens_time");
     lua_pushinteger(L, int_status);
     lua_setfield(L, -2, "status");
+#elif CONFIG_LUA_MODULE_IMU_CHIP_QMI8658
+    qmi8658_raw_axes_t acc = { 0 };
+    qmi8658_raw_axes_t gyro = { 0 };
+    uint8_t int_status = 0;
+    int8_t rslt = qmi8658_read_accel_gyro(&acc, &gyro, &ud->handle->sensor_handle);
+    if (rslt != QMI8658_OK) {
+        return luaL_error(L, "imu read failed: %d", rslt);
+    }
+    rslt = qmi8658_get_int_status(&int_status, &ud->handle->sensor_handle);
+    if (rslt != QMI8658_OK) {
+        return luaL_error(L, "imu read status failed: %d", rslt);
+    }
+
+    lua_newtable(L);
+    lua_module_imu_push_axes_table(L, acc.x, acc.y, acc.z);
+    lua_setfield(L, -2, "accel");
+    lua_module_imu_push_axes_table(L, gyro.x, gyro.y, gyro.z);
+    lua_setfield(L, -2, "gyro");
+    lua_pushinteger(L, (lua_Integer)esp_timer_get_time());
+    lua_setfield(L, -2, "sens_time");
+    lua_pushinteger(L, int_status);
+    lua_setfield(L, -2, "status");
 #endif
     return 1;
 }
@@ -702,6 +835,14 @@ static int lua_module_imu_read_temperature(lua_State *L)
     int16_t temp = 0;
     int8_t rslt = mpu6050_read_temperature_raw(&temp, &ud->handle->sensor_handle);
     if (rslt != MPU6050_OK) {
+        return luaL_error(L, "imu read_temperature failed: %d", rslt);
+    }
+
+    lua_pushinteger(L, temp);
+#elif CONFIG_LUA_MODULE_IMU_CHIP_QMI8658
+    int16_t temp = 0;
+    int8_t rslt = qmi8658_read_temperature_raw(&temp, &ud->handle->sensor_handle);
+    if (rslt != QMI8658_OK) {
         return luaL_error(L, "imu read_temperature failed: %d", rslt);
     }
 
@@ -744,6 +885,14 @@ static int lua_module_imu_read_int_status(lua_State *L)
     uint8_t int_status = 0;
     int8_t rslt = mpu6050_get_int_status(&int_status, &ud->handle->sensor_handle);
     if (rslt != MPU6050_OK) {
+        return luaL_error(L, "imu read_int_status failed: %d", rslt);
+    }
+
+    lua_pushinteger(L, int_status);
+#elif CONFIG_LUA_MODULE_IMU_CHIP_QMI8658
+    uint8_t int_status = 0;
+    int8_t rslt = qmi8658_get_int_status(&int_status, &ud->handle->sensor_handle);
+    if (rslt != QMI8658_OK) {
         return luaL_error(L, "imu read_int_status failed: %d", rslt);
     }
 
@@ -910,6 +1059,8 @@ static int lua_module_imu_new(lua_State *L)
         cfg.i2c_addr = ICM42670_I2C_ADDRESS;
 #elif CONFIG_LUA_MODULE_IMU_CHIP_MPU6050
         cfg.i2c_addr = MPU6050_I2C_ADDRESS_LOW;
+#elif CONFIG_LUA_MODULE_IMU_CHIP_QMI8658
+        cfg.i2c_addr = QMI8658_I2C_ADDRESS;
 #endif
         cfg.has_i2c_addr = true;
     }
@@ -940,6 +1091,13 @@ static int lua_module_imu_new(lua_State *L)
     }
     if (cfg.i2c_addr != MPU6050_I2C_ADDRESS_LOW && cfg.i2c_addr != MPU6050_I2C_ADDRESS_HIGH) {
         return luaL_error(L, "imu.new: unsupported MPU6050 I2C address 0x%02x", cfg.i2c_addr);
+    }
+#elif CONFIG_LUA_MODULE_IMU_CHIP_QMI8658
+    if (!cfg.has_int_gpio) {
+        cfg.int_gpio_num = -1;
+    }
+    if (cfg.i2c_addr != QMI8658_I2C_ADDRESS && cfg.i2c_addr != QMI8658_I2C_ADDRESS_SA0H) {
+        return luaL_error(L, "imu.new: unsupported QMI8658 I2C address 0x%02x", cfg.i2c_addr);
     }
 #endif
 

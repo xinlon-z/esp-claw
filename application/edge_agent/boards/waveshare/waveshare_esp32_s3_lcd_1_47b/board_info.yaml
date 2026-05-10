@@ -1,0 +1,5 @@
+board: waveshare_esp32_s3_lcd_1_47b
+chip: esp32s3
+version: 1.0.0
+description: "Waveshare ESP32-S3-LCD-1.47B Development Board (1.47-inch 172x320 round ST7789 display)"
+manufacturer: "Waveshare"
